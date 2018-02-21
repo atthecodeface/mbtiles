@@ -1,0 +1,13 @@
+(jbuild_version 1)
+
+(library (
+  (name mbtiles)
+  (public_name mbtiles)
+  (modules (pbf mbtiles_tiles mbtiles_file mbtiles_vector mbtiles))
+  (libraries (
+    batteries
+    sqlite3
+    zlib
+  ))
+))
+

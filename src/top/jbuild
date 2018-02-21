@@ -1,0 +1,15 @@
+(jbuild_version 1)
+
+(executable (
+  (name top)
+  (libraries (
+    mbtiles    
+    batteries
+  ))
+))
+
+(alias (
+  (name    run_top)
+  (deps    (top.exe))
+  (action  (run ${<}))
+))
