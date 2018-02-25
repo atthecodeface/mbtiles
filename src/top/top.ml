@@ -51,14 +51,16 @@ let _ =
   File.read_all_tiles map;
   File.display map;    
   let opt_t = File.get_tile_opt map 0 0 0 in
-  let opt_t = File.get_tile_opt map 9 256 344 in (* 0 0 0 *)
   let opt_t = File.get_tile_opt map 6 32 43 in (* 0 0 0 *)
+  let opt_t = File.get_tile_opt map 9 256 344 in (* 0 0 0 *)
+  let opt_t = File.get_tile_opt map 11 1025 1376 in (* 0 0 0 *)
+  let opt_t = File.get_tile_opt map 14 8170 (8*1376) in (* 0 0 0 *)
   let t = Option.get opt_t in
   let pbf = File.get_tile_pbf map t in
   (*let tile = Tile.create ~layer_filter_fn:(String.equal "place") () in*)
   let tile = Tile.create () in
   Tile.parse_pbf tile pbf;
-  let layer = Option.get (Tile.get_layer tile "water") in
+  let layer = Option.get (Tile.get_layer tile "building") in
   Layer.display layer;
   Layer.display ~all:true layer;
   Tile.layer_iter tile (fun l -> Printf.printf "Layer %s has %d features\n" (Layer.name l) (Tile.feature_count l));

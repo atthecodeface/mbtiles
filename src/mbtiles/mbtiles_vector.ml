@@ -102,7 +102,7 @@ let ba_uint32  size = Bigarray.(Array1.create int32 c_layout size)
 let ba_float32 size = Bigarray.(Array1.create float32 c_layout size)
 
 (*t t_geomtype *)
-type t_geomtype = Unknown | Point | Line | Polygon
+type t_geomtype = Unknown | Point | Line | Polygon | MultiPolygon | ConvexPolygon | Rectangle
 
 (*a Useful functions *)
 let sfmt = Printf.sprintf
@@ -112,15 +112,27 @@ let sfmt = Printf.sprintf
 module Geometry = struct
   (*t t structure - the immutable result *)
   type t = {
+      geom_type : t_geomtype;
       data_floats: t_ba_float32;
       steps: int array;
     }
 
+  (*f geom_type getter *)
+  let geom_type t = t.geom_type
+
+  (*f coords getter *)
+  let coords t = t.data_floats
+
+  (*f steps *)
+  let steps t = t.steps
+
   (*t t_build structure - used when parsing data from vector tile *)
   type t_build = {
     data_uint32 : t_ba_uint32;
+    len : int;
     next_block : int;
     extent : float;
+    mutable geom_type: t_geomtype; (* basically a path-through, but might detect a rectangle *)
     mutable cursor : float*float;
     mutable rev_coords : (float * float) list;
     mutable num_coords : int;
@@ -142,7 +154,7 @@ module Geometry = struct
   (*t coord - get a coordinate from a uint32 *)
   let coord t ui32 =
     let value = Int32.(to_float (shift_right_logical ui32 1)) in
-    if ((Int32.logand ui32 1l)==1l) then (-1. *. value /. t.extent) else (value /. t.extent)
+    if (Int32.(equal (logand ui32 1l) 1l)) then (-1. *. value /. t.extent) else (value /. t.extent)
 
   (*t add_count - add a number of 'cmd' and coordinate pairs to the path *)
   let add_count t ofs cmd count =
@@ -166,34 +178,109 @@ module Geometry = struct
     ofs
 
   (*t handle_cmd - handle a command from the vector tile uint32s, then loop *)
-  let rec handle_cmd t ofs =
+  let rec handle_cmd t ofs is_first =
     if (ofs>=t.next_block) then t else (
       let cmd_int = t.data_uint32.{ofs} in
       let cmd = (Int32.to_int cmd_int) land 7 in
       let count = Int32.(to_int (shift_right_logical cmd_int 3)) in
       match cmd with
-      | 1 -> handle_cmd t (add_count t (ofs+1) 1 count) (* move to *)
-      | 2 -> handle_cmd t (add_count t (ofs+1) 2 count) (* line to *)
-      | 7 -> handle_cmd t (add_close_path t (ofs+1)) (* close *)
+      | 1 -> (
+            if not is_first then (t.geom_type <- MultiPolygon);
+            handle_cmd t (add_count t (ofs+1) 1 count) false (* move to *)
+      )
+      | 2 -> handle_cmd t (add_count t (ofs+1) 2 count) false (* line to *)
+      | 7 -> handle_cmd t (add_close_path t (ofs+1)) false (* close *)
       | _ -> t
     )
 
+  (*f just_build - build from the command set *)
+  let just_build t ofs =
+    Some (handle_cmd t ofs true)
+
+  (*f try_rectangle 
+     rectangle is polygon of len=11, 1 (of 1) x y 2 (of 3) dx0 dy0 dx1 dy1 -dx0 -dx1 (7 of 0) 
+   *)
+  let try_rectangle t ofs =
+    if ((t.len==11) &&
+        (Int32.equal t.data_uint32.{ofs+0} 0x09l) &&
+        (Int32.equal t.data_uint32.{ofs+3} 0x1al) &&
+        (Int32.equal (Int32.logand 7l t.data_uint32.{ofs+10}) 7l) &&
+        (Int32.equal (Int32.logxor t.data_uint32.{ofs+4} t.data_uint32.{ofs+8}) 1l) &&
+        (Int32.equal (Int32.logxor t.data_uint32.{ofs+5} t.data_uint32.{ofs+9}) 1l) ) then (
+      t.geom_type <- Rectangle;
+      add_coord t (coord t t.data_uint32.{ofs+1}, coord t t.data_uint32.{ofs+2});
+      add_coord t (coord t t.data_uint32.{ofs+4}, coord t t.data_uint32.{ofs+5});
+      add_coord t (coord t t.data_uint32.{ofs+6}, coord t t.data_uint32.{ofs+7});
+      Some t
+    ) else (
+      None
+    )
+    
+  (*f try_convex_polygon
+     determine if it is a single polygon that is convex
+    triangle is moveto x y drawto x y x y close which means min length is 9
+   *)
+  let try_convex_polygon t ofs =
+    let num_pts_if_single = (t.len-3)/2 in
+    let is_convex = 
+      if ((num_pts_if_single>3) &&
+            (Int32.equal t.data_uint32.{ofs+0} 0x09l) && (* moveto *)
+              (Int32.equal (Int32.of_int (((num_pts_if_single-1) lsl 3) lor 2)) t.data_uint32.{ofs+ 3}) && (* lineto of num_pts_if_single*)
+                (Int32.equal (Int32.logand 7l t.data_uint32.{ofs+num_pts_if_single*2+2}) 7l) ) then  (* last is closepath *)
+        (
+          let rec is_convex n ofs_n dxn dyn =
+            if (n==num_pts_if_single) then true else (
+              let (dxnp1,dynp1) = (coord t t.data_uint32.{ofs_n}), (coord t t.data_uint32.{ofs_n+1}) in
+              let side_of_line = compare (dxn *. dynp1) (dxnp1 *. dyn) in
+              if (side_of_line<0) then (
+                false
+              ) else (
+                is_convex (n+1) (ofs_n+2) dxnp1 dynp1
+              )
+            )
+          in
+          (* Ignore the moveto coordinate as that does not effect concavity *)
+          let (dxn,dyn)     = (     (coord t t.data_uint32.{ofs+4}),       (coord t t.data_uint32.{ofs+5}))   in
+          is_convex 2 (ofs+6) dxn dyn
+        ) else (
+        false
+      )
+    in
+    if is_convex then (
+      t.geom_type <- ConvexPolygon;
+      just_build t ofs
+    ) else (
+      None
+    )
+    
   (*t create_from_maptile_geometry - build from vector tile uint32s then cast immutably *)
-  let create_from_maptile_geometry ?extent:(extent=4096) ba ofs len =
+  let create_from_maptile_geometry ?extent:(extent=4096) geom_type ba ofs len =
     let build = { data_uint32=ba;
                   extent = float extent;
+                  len = len;
                   next_block=ofs+len;
                   cursor = (0.,0.);
                   rev_coords=[];
                   rev_steps=[];
                   num_coords=0;
                   path_open_coord=0;
+                  geom_type = geom_type;
                 }
     in
-    let build = handle_cmd build ofs in
+    let try_x opt_build f build ofs =
+      match opt_build with
+      | None -> f build ofs
+      | b -> b
+    in
+    let opt_build = None in
+    let opt_build = try_x opt_build try_convex_polygon build ofs in
+    let opt_build = try_x opt_build try_rectangle      build ofs in
+    let opt_build = try_x opt_build just_build         build ofs in
+    let build = Option.get opt_build in
     let n = build.num_coords in
     let data_floats = ba_float32 (2*n) in
     let steps = Array.of_list (List.rev build.rev_steps) in
+    let geom_type = build.geom_type in
     let rec populate_coords i cs =
       match cs with
       | [] -> ()
@@ -205,6 +292,7 @@ module Geometry = struct
     in
     populate_coords (n-1) build.rev_coords;
     {
+      geom_type;
       data_floats;
       steps;
     }
@@ -503,7 +591,7 @@ module Feature = struct
   (*f geometry *)
   let geometry ?extent t ba =
     let (ofs,len) = t.geom_ol in
-    Geometry.create_from_maptile_geometry ?extent:extent ba ofs len
+    Geometry.create_from_maptile_geometry ?extent:extent t.geom_type ba ofs len
 
   (*f kv_find_key *)
   let kv_find_key t get_kv name =
@@ -553,16 +641,25 @@ module Feature = struct
     get_kv (2*n+ofs)
 
   (*f display *)
-  let display ?indent:(indent="") t get_kv =
+  let display ?indent:(indent="") t data_uint32 get_kv =
     let geom_string = 
       match t.geom_type  with
       | Point -> "points"
       | Line -> "lines"
       | Polygon -> "polygon"
+      | ConvexPolygon -> "convex polygon"
+      | MultiPolygon -> "multiple polygons (and outer with >=1 inner polygons)"
+      | Rectangle -> "rectangle"
       | _ -> "unknown"
     in
     Printf.printf "%sFeature uid(%d) geometry %s\n" indent t.uid geom_string;
     Printf.printf "%s%sNum tags (%d) num geom (%d)\n" indent indent ((snd t.tag_ol)/2) (snd t.geom_ol);
+    let g = min (snd t.geom_ol) 12 in
+    let ofs = fst t.geom_ol in
+    for i=0 to g-1 do
+    Printf.printf "(%ld)" data_uint32.{ofs+i};
+    done;
+    Printf.printf "\n";
     let (ofs,len) = t.tag_ol in
     for i=0 to len/2-1 do
       let (ks, vs) = KeyValue.strs (get_kv (ofs+2*i)) in
@@ -840,7 +937,7 @@ module Layer = struct
   let display ?all:(all=false) t =
     Printf.printf "Layer '%s' est bytes %d num_uint32 %d num_chars %d num_features %d\n" t.name (byte_size t) (Bigarray.Array1.dim t.data_uint32) (Bigarray.Array1.dim t.data_chars) (Array.length t.features);
     if all then (
-      Array.iter (fun f -> Feature.display ~indent:"  " f (get_kv t)) t.features;
+      Array.iter (fun f -> Feature.display ~indent:"  " f t.data_uint32 (get_kv t)) t.features;
     );
     ()
 
