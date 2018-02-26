@@ -102,7 +102,7 @@ let ba_uint32  size = Bigarray.(Array1.create int32 c_layout size)
 let ba_float32 size = Bigarray.(Array1.create float32 c_layout size)
 
 (*t t_geomtype *)
-type t_geomtype = Unknown | Point | Line | Polygon | MultiPolygon | ConvexPolygon | Rectangle
+type t_geomtype = Unknown | Point | Line | Polygon | MultiPolygon | ConvexPolygon
 
 (*a Useful functions *)
 let sfmt = Printf.sprintf
@@ -132,7 +132,7 @@ module Geometry = struct
     len : int;
     next_block : int;
     extent : float;
-    mutable geom_type: t_geomtype; (* basically a path-through, but might detect a rectangle *)
+    mutable geom_type: t_geomtype;
     mutable cursor : float*float;
     mutable rev_coords : (float * float) list;
     mutable num_coords : int;
@@ -197,25 +197,6 @@ module Geometry = struct
   let just_build t ofs =
     Some (handle_cmd t ofs true)
 
-  (*f try_rectangle 
-     rectangle is polygon of len=11, 1 (of 1) x y 2 (of 3) dx0 dy0 dx1 dy1 -dx0 -dx1 (7 of 0) 
-   *)
-  let try_rectangle t ofs =
-    if ((t.len==11) &&
-        (Int32.equal t.data_uint32.{ofs+0} 0x09l) &&
-        (Int32.equal t.data_uint32.{ofs+3} 0x1al) &&
-        (Int32.equal (Int32.logand 7l t.data_uint32.{ofs+10}) 7l) &&
-        (Int32.equal (Int32.logxor t.data_uint32.{ofs+4} t.data_uint32.{ofs+8}) 1l) &&
-        (Int32.equal (Int32.logxor t.data_uint32.{ofs+5} t.data_uint32.{ofs+9}) 1l) ) then (
-      t.geom_type <- Rectangle;
-      add_coord t (coord t t.data_uint32.{ofs+1}, coord t t.data_uint32.{ofs+2});
-      add_coord t (coord t t.data_uint32.{ofs+4}, coord t t.data_uint32.{ofs+5});
-      add_coord t (coord t t.data_uint32.{ofs+6}, coord t t.data_uint32.{ofs+7});
-      Some t
-    ) else (
-      None
-    )
-    
   (*f try_convex_polygon
      determine if it is a single polygon that is convex
     triangle is moveto x y drawto x y x y close which means min length is 9
@@ -274,7 +255,6 @@ module Geometry = struct
     in
     let opt_build = None in
     let opt_build = try_x opt_build try_convex_polygon build ofs in
-    let opt_build = try_x opt_build try_rectangle      build ofs in
     let opt_build = try_x opt_build just_build         build ofs in
     let build = Option.get opt_build in
     let n = build.num_coords in
@@ -649,7 +629,6 @@ module Feature = struct
       | Polygon -> "polygon"
       | ConvexPolygon -> "convex polygon"
       | MultiPolygon -> "multiple polygons (and outer with >=1 inner polygons)"
-      | Rectangle -> "rectangle"
       | _ -> "unknown"
     in
     Printf.printf "%sFeature uid(%d) geometry %s\n" indent t.uid geom_string;
