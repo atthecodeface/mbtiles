@@ -114,7 +114,7 @@ module Geometry = struct
   type t = {
       geom_type : t_geomtype;
       data_floats: t_ba_float32;
-      steps: int array;
+      steps: int array; (* steps is coord<<12 | (count<<4) | 1 (lineto) / 2 (moveto) / 7 (closepath) *)
     }
 
   (*f geom_type getter *)
@@ -123,7 +123,7 @@ module Geometry = struct
   (*f coords getter *)
   let coords t = t.data_floats
 
-  (*f steps *)
+  (*f steps getter *)
   let steps t = t.steps
 
   (*t t_build structure - used when parsing data from vector tile *)
@@ -141,8 +141,8 @@ module Geometry = struct
     }
 
   (*t add_step - add a step to the path *)
-  let add_step t cmd coord =
-    let step = (coord lsl 8) lor cmd in
+  let add_step t cmd count coord =
+    let step = (coord lsl 12) lor (count lsl 4) lor cmd in
     t.rev_steps <- step :: t.rev_steps
 
   (*t add_coord - add a coordinate pair to the path *)
@@ -159,13 +159,13 @@ module Geometry = struct
   (*t add_count - add a number of 'cmd' and coordinate pairs to the path *)
   let add_count t ofs cmd count =
     if (ofs+2*count<=t.next_block) then (
+      add_step t cmd count t.num_coords;
       for i=0 to count-1 do
         let dx = coord t t.data_uint32.{ofs+2*i+0} in
         let dy = coord t t.data_uint32.{ofs+2*i+1} in
         let (cx,cy) = t.cursor in
         let pt = (cx+.dx, cy+.dy) in
         let n = t.num_coords in
-        add_step t cmd n;
         add_coord t pt
       done;
       if (cmd==1) then t.path_open_coord <- max 0 (t.num_coords-1);
@@ -174,7 +174,7 @@ module Geometry = struct
 
   (*t add_close_path - add closing of a path *)
   let add_close_path t ofs =
-    add_step t 7 t.path_open_coord;
+    add_step t 7 0 t.path_open_coord;
     ofs
 
   (*t handle_cmd - handle a command from the vector tile uint32s, then loop *)
@@ -185,7 +185,7 @@ module Geometry = struct
       let count = Int32.(to_int (shift_right_logical cmd_int 3)) in
       match cmd with
       | 1 -> (
-            if not is_first then (t.geom_type <- MultiPolygon);
+            if ((not is_first) && (t.geom_type=Polygon)) then (t.geom_type <- MultiPolygon);
             handle_cmd t (add_count t (ofs+1) 1 count) false (* move to *)
       )
       | 2 -> handle_cmd t (add_count t (ofs+1) 2 count) false (* line to *)
