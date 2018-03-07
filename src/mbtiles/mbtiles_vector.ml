@@ -209,20 +209,27 @@ module Geometry = struct
               (Int32.equal (Int32.of_int (((num_pts_if_single-1) lsl 3) lor 2)) t.data_uint32.{ofs+ 3}) && (* lineto of num_pts_if_single*)
                 (Int32.equal (Int32.logand 7l t.data_uint32.{ofs+num_pts_if_single*2+2}) 7l) ) then  (* last is closepath *)
         (
-          let rec is_convex n ofs_n dxn dyn =
-            if (n==num_pts_if_single) then true else (
+          let rec is_convex n ofs_n dxn dyn sumx sumy =
+            if (n==num_pts_if_single) then (
+              let side_of_line = compare (sumx *. dyn) (dxn *. sumy) in (* Note sumx/y is -dxnp1/dnynp1 *)
+              if (side_of_line<0) then false else (
+                let (dxn,dyn)     = (     (coord t t.data_uint32.{ofs+4}),       (coord t t.data_uint32.{ofs+5}))   in
+                let side_of_line = compare (sumx *. dyn) (dxn *. sumy) in (* Note sumx/y is -dxnp1/dnynp1 *)
+                (side_of_line <= 0)
+              )
+            ) else (
               let (dxnp1,dynp1) = (coord t t.data_uint32.{ofs_n}), (coord t t.data_uint32.{ofs_n+1}) in
               let side_of_line = compare (dxn *. dynp1) (dxnp1 *. dyn) in
               if (side_of_line<0) then (
                 false
               ) else (
-                is_convex (n+1) (ofs_n+2) dxnp1 dynp1
+                is_convex (n+1) (ofs_n+2) dxnp1 dynp1 (sumx +. dxnp1) (sumy +. dynp1)
               )
             )
           in
           (* Ignore the moveto coordinate as that does not effect concavity *)
           let (dxn,dyn)     = (     (coord t t.data_uint32.{ofs+4}),       (coord t t.data_uint32.{ofs+5}))   in
-          is_convex 2 (ofs+6) dxn dyn
+          is_convex 2 (ofs+6) dxn dyn dxn dyn
         ) else (
         false
       )
